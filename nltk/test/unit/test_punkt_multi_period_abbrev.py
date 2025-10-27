@@ -5,6 +5,8 @@ import pytest
 import nltk
 from nltk.tokenize.punkt import PunktParameters, PunktSentenceTokenizer
 
+# hello
+n = 1234567
 # deterministic seed for reproducible tests
 RNG_SEED = 12345
 random.seed(RNG_SEED)
