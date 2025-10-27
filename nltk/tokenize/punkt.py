@@ -295,10 +295,77 @@ class PunktLanguageVars:
             )
             return self._re_period_context
 
+    _re_non_punct = re.compile(r"[^\W\d]", re.UNICODE)
 
-_re_non_punct = re.compile(r"[^\W\d]", re.UNICODE)
-"""Matches token types that are not merely punctuation. (Types for
-numeric tokens are changed to ##number## and hence contain alpha.)"""
+    # --- find dotted acronyms like "U.S.A." or "Ph.D." ---
+    # single-letter segments: A.B. or A.B.C. (very common)
+    _multi_period_single_re = re.compile(
+        r'(?<!\w)(?:[A-Za-z]\.){2,}(?=[\s\)\]\,"\'\.;:?]|$)'
+    )
+
+    # multi-letter segments: Ph.D., D.Phil., a.k.a., etc.
+    # allow 1-6 letters per segment, repeated 2+ times, with trailing dot
+    _multi_period_multi_re = re.compile(
+        r'(?<!\w)(?:[A-Za-z]{1,6}\.){2,}(?=[\s\)\]\,"\'\.;:?]|$)'
+    )
+
+    def _normalize_for_punkt(self, token: str):
+        """
+        Return normalized forms suitable for PunktParameters.abbrev_types.
+        - no_dots: "U.S.A." -> "usa"
+        - internal: "U.S.A." -> "u.s.a" (lowercase, trailing dot removed)
+        Also strip surrounding parentheses/commas/quotes that often appear in contexts.
+        """
+        # strip surrounding punctuation commonly adjacent to tokens
+        tok = token.strip()
+        tok = re.sub(r'^[\(\[\{"\']+|[\)\]\}"\',;:.!?]+$', "", tok)
+        s_lower = tok.lower()
+        internal = s_lower.rstrip(".")
+        no_dots = re.sub(r"\.", "", s_lower)
+        return no_dots, internal
+
+    def discover_multi_period_abbrevs(self, text: str):
+        """
+        Scans `text` and returns a set of discovered dotted-acronym tokens.
+        Uses both single-letter and multi-letter regexes to catch Ph.D., U.S.A., a.k.a., etc.
+        """
+        found = set()
+        # run multi-letter regex first (it subsumes some single-letter cases)
+        for m in self._multi_period_multi_re.finditer(text):
+            tok = m.group(0)
+            found.add(tok)
+        # include single-letter matches that weren't captured by multi-letter pattern
+        for m in self._multi_period_single_re.finditer(text):
+            tok = m.group(0)
+            # avoid duplicates (multi regex might have captured it already)
+            if tok not in found:
+                found.add(tok)
+        return found
+
+    def seed_punkt_abbrevs(self, params: "PunktParameters", text: str = None, extra=()):
+        """
+        Add normalized forms (no_dots and internal) to params.abbrev_types.
+        If `text` provided, discover dotted acronyms in it and include them.
+        `extra` may be an iterable of additional dotted abbreviations.
+        This merges into existing params.abbrev_types (non-destructive).
+        """
+        candidates = set(extra or ())
+        if text:
+            candidates.update(self.discover_multi_period_abbrevs(text))
+
+        names = set()
+        for tok in candidates:
+            a, b = self._normalize_for_punkt(tok)
+            # add multiple safe variants to improve robustness across Punkt versions
+            names.add(a)  # e.g., 'usa'
+            names.add(b)  # e.g., 'u.s.a'
+            names.add(b.replace(".", ""))  # 'usa' again but safe
+        # merge safe normalized names into params without overwriting
+        try:
+            params.abbrev_types.update(names)
+        except Exception:
+            params.abbrev_types = set(names)
+        return params
 
 
 # }
@@ -485,7 +552,7 @@ class PunktToken:
     @property
     def is_non_punct(self):
         """True if the token is either a number or is alphabetic."""
-        return _re_non_punct.search(self.type)
+        return PunktLanguageVars._re_non_punct.search(self.type)
 
     # ////////////////////////////////////////////////////////////
     # { String representation
@@ -952,7 +1019,7 @@ class PunktTrainer(PunktBaseClass):
         for typ in types:
             # Check some basic conditions, to rule out words that are
             # clearly not abbrev_types.
-            if not _re_non_punct.search(typ) or typ == "##number##":
+            if not PunktLanguageVars._re_non_punct.search(typ) or typ == "##number##":
                 continue
 
             if typ.endswith("."):
